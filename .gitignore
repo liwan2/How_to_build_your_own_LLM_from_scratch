@@ -6,6 +6,7 @@ pretrain_ref.py
 Eval_llm_ref.py
 trainer/trainer_utils_ref.py
 model/model_minimind_ref.py
+train_full_sft.py
 #测试
 Tokenizer.ipynb
 process_and_thread.ipynb
