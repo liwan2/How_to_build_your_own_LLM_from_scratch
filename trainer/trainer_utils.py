@@ -14,16 +14,20 @@ from model.model_liwan import liwanForcasualLLM
 
 
 def is_main_process():
+    """判断是否为主进程"""
     return not dist.is_initialized() or dist.get_rank() == 0
 
 def Logger(content):
+    """打印日志"""
     if is_main_process():
         print(content)
 
 def get_lr(current_step, total_steps, lr):
+    """平滑过渡衰减lr --> 0.1*lr"""
     return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
 
 def init_distributed_mode():
+    """正式初始化分布式，同时返回本地显卡编号"""
     if int(os.environ.get("RANK", -1)) == -1:
         return 0  
 
@@ -33,6 +37,7 @@ def init_distributed_mode():
     return local_rank
 
 def setup_seed(seed: int):
+    """固定随机与计算路径，方便复现"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -42,6 +47,7 @@ def setup_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 def get_model_params(model, config):
+    """计算打印模型参数"""
     total = sum(p.numel() for p in model.parameters()) / 1e6
     n_routed = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', 0))#getattr(对象, "属性名") = 你想根据一个字符串名字**，去获取某个对象身上的东西
     n_active = getattr(config, 'num_experts_per_tok', 0)
@@ -54,6 +60,7 @@ def get_model_params(model, config):
     else: Logger(f'Model Params: {total:.2f}M')
 
 def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
+    """保存模型&&断点续训"""
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
@@ -107,3 +114,64 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
                 Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
             return ckp_data
         return None
+
+def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
+    """初始化分词器+模型"""
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    model = liwanForcasualLLM(lm_config)
+
+    if from_weight!= 'none':
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        weights = torch.load(weight_path, map_location=device)
+        model.load_state_dict(weights, strict=False)
+
+    get_model_params(model, lm_config)
+    Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')
+    return model.to(device), tokenizer
+
+class SkipBatchSampler(Sampler):
+    """自定义按批次取数据，并且能跳过前面若干batch"""
+    def __init__(self, sampler, batch_size, skip_batches=0):
+        self.sampler = sampler
+        self.batch_size = batch_size
+        self.skip_batches = skip_batches
+
+    def __iter__(self):
+        batch = []
+        skipped = 0
+        for idx in self.sampler:
+            batch.append(idx)
+            if len(batch) == self.batch_size:
+                if skipped < self.skip_batches:
+                    skipped += 1
+                    batch = []
+                    continue
+                yield batch
+                batch = []
+        if len(batch) > 0 and skipped >= self.skip_batches:
+            yield batch
+
+    def __len__(self):
+        total_batches = (len(self.sampler) + self.batch_size - 1) // self.batch_size
+        return max(0, total_batches - self.skip_batches)
+
+class LMForRewardModel:
+    """奖励函数，用于给对话回答打质量分"""
+    def __init__(self, model_path, device="cuda", dtype=torch.float16):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(model_path, torch_dtype=dtype, trust_remote_code=True)
+        self.model = self.model.to(device).eval()
+        self.device = device
+
+    @torch.no_grad()
+    def get_score(self, messages, response):
+        history_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages[:-1]])
+        last_query = messages[-1]['content'] if messages else ""
+        message_context = f"{history_text}\n以上是对话历史。我的新问题是：\n{last_query}" if history_text else last_query
+        eval_messages = [
+            {"role": "user", "content": message_context},
+            {"role": "assistant", "content": response}
+        ]
+        score = self.model.get_score(self.tokenizer, eval_messages)
+        return max(min(score, 3.0), -3.0)
