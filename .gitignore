@@ -1,5 +1,7 @@
-langchain_env/
+langchain/
 Datasets/
+torch_offline/
+try_cuda.py
 #参考
 Tokenizer_ref.py
 pretrain_ref.py
