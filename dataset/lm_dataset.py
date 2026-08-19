@@ -69,12 +69,13 @@ class SFTDataset(Dataset):
         b. 否则，根据 add_system_ratio 概率添加 system prompt
     3. 对数据进行后处理，具体是：
         a. 如果 prompt_content 中有 '<think>\n\n</think>\n\n'，则根据 empty_think_ratio 概率删除该标记"""
-    def __init__(self, jsonl_path, tokenizer, max_length=1024):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024, add_system_ratio=0.2):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         features = Features({'conversations': [{'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'), 'tools': Value('string'), 'tool_calls': Value('string')}]})
         self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features)
+        self.add_system_ratio = add_system_ratio
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
 
@@ -118,7 +119,7 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, index):
         sample = self.samples[index]
-        conversations = pre_processing_chat(sample['conversations'])
+        conversations = pre_processing_chat(sample['conversations'], self.add_system_ratio)
         prompt = self.create_chat_prompt(conversations)
         prompt = post_processing_chat(prompt)
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]

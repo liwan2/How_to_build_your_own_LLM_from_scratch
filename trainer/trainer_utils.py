@@ -117,6 +117,9 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
 
 def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
     """初始化分词器+模型"""
+    _base = os.path.dirname(os.path.abspath(__file__))
+    tokenizer_path = os.path.normpath(os.path.join(_base, tokenizer_path))
+    save_dir = os.path.normpath(os.path.join(_base, save_dir))
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = liwanForcasualLLM(lm_config)
 

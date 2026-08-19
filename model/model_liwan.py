@@ -11,11 +11,11 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 #liwan_config
 class liwan_config(PretrainedConfig):
     model_name="liwan"
-    def __init__(self,hidden_size:int=768,num_hidden_layer:int=8,use_mox:bool=False,**kwargs):
+    def __init__(self,hidden_size:int=768,num_hidden_layer:int=8,use_moe:bool=False,**kwargs):
         super().__init__(**kwargs)
         self.hidden_size=hidden_size
         self.num_hidden_layer=num_hidden_layer
-        self.use_mox=use_mox
+        self.use_moe=use_moe
         self.num_attention_heads=kwargs.get("num_attention_heads",8)
         self.num_key_value_heads=kwargs.get("num_key_value_heads",4)
         self.head_dim=kwargs.get("head_dim",self.hidden_size//self.num_attention_heads)
@@ -55,7 +55,7 @@ class RMSnorm(nn.Module):
     def RMS(self,x):
         return x*torch.rsqrt(x.pow(2).mean(-1,keepdim=True)+self.eps)
     def forward(self,x):
-        return self.RMS(x.float())*self.weight.type_as(x)
+        return (self.RMS(x.float())*self.weight.type_as(x)).type_as(x)
     
 def precompute_freqs_cis(dim,end:int=int(32*1024),rope_base:float=1e6,rope_scale:dict=None)->tuple[torch.Tensor, torch.Tensor]:
     """提前计算位置编码的频率"""
@@ -132,7 +132,7 @@ class Attention(nn.Module):
         self.dropout=config.dropout
         self.flash=hasattr(torch.nn.functional,'scaled_dot_product_attention') and config.flash_attn
     
-    def forward(self,x,pos_embedding,use_cache=False,past_key_value=None,attention_mask=None):
+    def forward(self,x,pos_embedding,past_key_value=None,use_cache=False,attention_mask=None):
         cos,sin=pos_embedding
         bsz,seq_len,_=x.shape
         xq=self.q_proj(x)
@@ -230,7 +230,7 @@ class liwanBlock(nn.Module):
         self.self_attn=Attention(config)
         self.input_layernorm=RMSnorm(config.hidden_size,config.rms_norm_eps)
         self.post_attention_layernorm=RMSnorm(config.hidden_size,config.rms_norm_eps)
-        self.MLP=MOEFeedback(config) if config.use_mox else Feedback(config)
+        self.MLP=MOEFeedback(config) if config.use_moe else Feedback(config)
 
     def forward(self,hidden_status,pos_embeddings,past_key_value=None,use_cache=False,attention_mask=None):
         residual=hidden_status
@@ -264,19 +264,19 @@ class liwanModel(nn.Module):
         """判断正余弦表是否初始化，否则重新运算"""
         if self.freqs_cos[0, 0] == 0:
             freqs_cos,freqs_sin=precompute_freqs_cis(self.config.head_dim,end=self.config.max_position_embeddings,rope_base=1e6,rope_scale=None)
-            freqs_cos,freqs_sin=freqs_cos.to(hidden_status.device),freqs_sin.to(hidden_status.device)
+            self.freqs_cos.data, self.freqs_sin.data = freqs_cos.to(hidden_status.device), freqs_sin.to(hidden_status.device)
         pos_embeddings=(self.freqs_cos[start_pos:start_pos+seq_len,:],self.freqs_sin[start_pos:start_pos+seq_len,:])
         presents=[]
         for layer,past_key_value in zip(self.layers,past_key_values):
-            hidden_status,present=layer(hidden_status,pos_embeddings,past_key_value,past_key_value,use_cache,attention_mask)
+            hidden_status,present=layer(hidden_status,pos_embeddings,past_key_value,use_cache,attention_mask)
             presents.append(present)
         hidden_status=self.norm(hidden_status)
-        aux_loss=sum(getattr(layer.MLP,'aux_loss',0) for layer in self.layers)#getattr(obj, 'attr', default)→ 有 attr 就返回它，没有就返回 0
+        aux_loss = sum(getattr(layer.MLP, 'aux_loss', torch.tensor(0.0, device=hidden_status.device)) for layer in self.layers)
         return hidden_status,presents,aux_loss
 
 class liwanForcasualLLM(PreTrainedModel,GenerationMixin):
     config_class=liwan_config
-    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
     def __init__(self,config:liwan_config=None):
         self.config=config or liwan_config()
         super().__init__(config)
@@ -286,6 +286,12 @@ class liwanForcasualLLM(PreTrainedModel,GenerationMixin):
             self.model.embeddings.weight=self.lm_head.weight
         self.post_init()
 
+    def get_input_embeddings(self):
+        return self.model.embeddings
+
+    def set_input_embeddings(self, value):
+        self.model.embeddings = value
+
     def forward(self,input_ids,attention_mask=None,past_key_values=None,use_cache=False,logits_to_keep=0,labels=None,**kwargs):
         hidden_status,past_key_values,aux_loss=self.model(input_ids,attention_mask,past_key_values,use_cache,**kwargs)
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -293,7 +299,7 @@ class liwanForcasualLLM(PreTrainedModel,GenerationMixin):
         loss=None
         if labels is not None:
             x,y=logits[...,:-1,:].contiguous(),labels[...,1:].contiguous()
-            loss=F.cross_entropy(x.view(-1,self.vocab_size),y.view(-1),ignore_index=-100)
+            loss=F.cross_entropy(x.view(-1,self.config.vocab_size),y.view(-1),ignore_index=-100)
         return MoeCausalLMOutputWithPast(loss=loss,aux_loss=aux_loss,logits=logits,past_key_values=past_key_values,hidden_states=hidden_status)
     
     @torch.inference_mode()
@@ -301,7 +307,7 @@ class liwanForcasualLLM(PreTrainedModel,GenerationMixin):
         input_ids=kwargs.pop("input_ids",inputs).repeat(num_return_sequences,1)
         attention_mask=attention_mask.repeat(num_return_sequences,1) if attention_mask is not None else None
         past_key_value=kwargs.pop("past_key_value",None)
-        finished=torch.zeros(input_ids[0],dtype=torch.bool,device=input_ids.device)
+        finished=torch.zeros(input_ids.shape[0],dtype=torch.bool,device=input_ids.device)
         if streamer:streamer.put(input_ids.cpu())
         for _ in range(max_new_tokens):
             past_len=past_key_value[0][0].shape[1] if past_key_value else 0#是seq_len
