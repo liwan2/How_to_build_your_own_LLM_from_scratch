@@ -22,6 +22,7 @@ trainer/__pycache__/
 model/__pycache__/
 Linux/
 dataset/lm_dataset_ref.py
+dataset/__pycache__/
 langchain_graph/
 My_secret_datasets/
 test_sft.py
