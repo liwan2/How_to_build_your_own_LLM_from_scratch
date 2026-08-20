@@ -1,0 +1,2 @@
+out/full_sft_v2_768.pth filter=lfs diff=lfs merge=lfs -text
+out_ref/full_sft_v2_768.pth filter=lfs diff=lfs merge=lfs -text
