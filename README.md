@@ -2,7 +2,7 @@
 
 基于 PyTorch 从零实现的大型言模型（LLM）项目，覆盖从分词器训练、预训练、监督微调（SFT）、LoRA 微调到推理与评估的完整闭环。模型命名为 **liwan**。
 
-本项目旨在以清晰、可读的代码展示 Decoder-only Transformer 的核心实现细节，同时具备工业级的工程能力（分布式训练、混合精度、断点续训、MoE 等）方便同我一样的学习者深入理解LLM的实现。
+本项目旨在以清晰、可读的代码展示 Decoder-only Transformer 的核心实现细节，同时具备工业级的工程能力（分布式训练、混合精度、断点续训、MoE 等）方便同我一样的学习者深入理解LLM的实现，同时上传了一版模型权重，方便学习者使用。
 
 ## 特性
 
@@ -39,6 +39,8 @@
 │   ├── train_full_sft.py      # 全量 SFT 微调脚本
 │   ├── sft_lora.py            # LoRA 微调脚本
 │   └── trainer_utils.py       # 训练工具函数（分布式、检查点、采样器等）
+├── out_ref/
+|   └── full_sft_v2_768.pth    # 训练完成的参考模型，方便本地快速推理
 ├── Eval_llm.py                # 预训练模型续写推理
 ├── Eval_perplexity.py         # 困惑度评估
 └── .gitignore
