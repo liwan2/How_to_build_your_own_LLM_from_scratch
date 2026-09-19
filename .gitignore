@@ -26,3 +26,10 @@ dataset/__pycache__/
 langchain_graph/
 My_secret_datasets/
 test_sft.py
+#测试
+train_minister.yaml
+qwen_model/
+chat_qwen.py
+llamaboard_cache/
+saves/
+chat_minister.py
